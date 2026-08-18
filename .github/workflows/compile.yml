@@ -7,7 +7,6 @@ on:
     paths:
       - "*.tsv"
       - "*.csv"
-      - "compiler/**"
       - "compile.py"
       - "requirements.txt"
       - ".github/workflows/compile.yml"
@@ -36,7 +35,19 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
+      # 编译模块实时引用 tianzi 的 lexloader/（本仓库不携带副本，避免分叉）。
+      # 仓库公开时用默认 URL；私有仓库时在 Settings -> Secrets 里添加
+      # TIANZI_CLONE_URL，形如 https://<用户名>:<PAT>@github.com/WFLing-seaer/Tianzi.git
+      - name: 拉取编译器（tianzi lexloader）
+        env:
+          TIANZI_CLONE_URL: ${{ secrets.TIANZI_CLONE_URL }}
+        run: |
+          URL="${TIANZI_CLONE_URL:-https://github.com/WFLing-seaer/Tianzi.git}"
+          git clone --depth 1 "$URL" "$RUNNER_TEMP/tianzi"
+
       - name: 编译词库
+        env:
+          LEX_COMPILER_DIR: "${{ runner.temp }}/tianzi/lexloader"
         run: python compile.py
 
       # parquets 分支是纯产物分支：每次从 0 生成一个干净快照并 force-push。
