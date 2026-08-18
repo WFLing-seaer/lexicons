@@ -1,6 +1,5 @@
 name: compile
 
-# 源文件 / 编译器 / 构建脚本变化时触发；也可手动跑（workflow_dispatch）
 on:
   push:
     branches: [main]
@@ -13,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # 需要向 parquets 分支推送编译产物
+  contents: write
 
 concurrency:
   group: compile
@@ -28,17 +27,13 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # numba 0.66.0 官方支持 3.10~3.13；3.13 最稳妥
           python-version: "3.13"
           cache: pip
 
       - name: 安装依赖
         run: pip install -r requirements.txt
 
-      # 编译模块实时引用 tianzi 的 lexloader/（本仓库不携带副本，避免分叉）。
-      # 仓库公开时用默认 URL；私有仓库时在 Settings -> Secrets 里添加
-      # TIANZI_CLONE_URL，形如 https://<用户名>:<PAT>@github.com/WFLing-seaer/Tianzi.git
-      - name: 拉取编译器（tianzi lexloader）
+      - name: 拉取编译器（tianzi ll）
         env:
           TIANZI_CLONE_URL: ${{ secrets.TIANZI_CLONE_URL }}
         run: |
@@ -50,9 +45,7 @@ jobs:
           LEX_COMPILER_DIR: "${{ runner.temp }}/tianzi/lexloader"
         run: python compile.py
 
-      # parquets 分支是纯产物分支：每次从 0 生成一个干净快照并 force-push。
-      # 分支上永远只有当前这组 .pq，无历史包袱；下游同步方式见 README。
-      - name: 发布到 parquets 分支
+      - name: 推分支
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -67,5 +60,5 @@ jobs:
           git -C "$SNAP" config user.name "github-actions[bot]"
           git -C "$SNAP" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C "$SNAP" add -A
-          git -C "$SNAP" commit -q -m "build: 编译词库 from ${{ github.sha }}"
+          git -C "$SNAP" commit -q -m "build: 编译词库 ← ${{ github.sha }}"
           git -C "$SNAP" push -f origin HEAD:refs/heads/parquets
