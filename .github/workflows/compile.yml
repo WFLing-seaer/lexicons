@@ -24,11 +24,48 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需要完整历史才能 diff 出本次提交改动的源文件
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14" #tianzi整个都是3.14+。。。。。
           cache: pip
+
+      # 增量编译：只重编译本次提交改动过的 .tsv/.csv。
+      # 编译器（lexloader/）、依赖或本工作流本身变了才全量重编。
+      # 输出：mode=full|partial|skip，sources=需要编译的文件
+      - name: 计算本次需要编译的源文件
+        id: sources
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          MODE=full
+          SOURCES=""
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            META=$(git diff --name-only "$BEFORE" HEAD -- compile.py requirements.txt .github/workflows/compile.yml)
+            if [ -n "$META" ]; then
+              echo "编译器/依赖/工作流有变更 → 全量编译"
+            else
+              CHANGED=$(git diff --name-only "$BEFORE" HEAD -- '*.tsv' '*.csv')
+              if [ -z "$CHANGED" ]; then
+                MODE=skip
+              else
+                MODE=partial
+                # 文件名均不含空格；被删的源文件不在工作区，自然不会被编译
+                for f in $CHANGED; do
+                  [ -f "$f" ] && SOURCES="$SOURCES $f"
+                done
+              fi
+            fi
+          else
+            echo "手动触发或分支首个提交 → 全量编译"
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "sources=$SOURCES" >> "$GITHUB_OUTPUT"
+          echo "→ mode=$MODE sources=[$SOURCES]"
 
       - name: 安装依赖
         run: pip install -r requirements.txt
@@ -41,11 +78,20 @@ jobs:
           git clone --depth 1 "$URL" "$RUNNER_TEMP/tianzi"
 
       - name: 编译词库
+        if: steps.sources.outputs.mode == 'full' || steps.sources.outputs.sources != ''
         env:
           LEX_COMPILER_DIR: "${{ runner.temp }}/tianzi/lexloader"
-        run: python compile.py
+          # tqdm 进度条会把 GH Actions 日志刷爆（tqdm 在 import 时读这个变量）
+          TQDM_DISABLE: "1"
+          SOURCES: ${{ steps.sources.outputs.sources }}
+        run: |
+          set -euo pipefail
+          # SOURCES 为空（全量模式）时等价于 python compile.py
+          # shellcheck disable=SC2086
+          python compile.py $SOURCES
 
       - name: 推分支
+        if: steps.sources.outputs.mode != 'skip'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -53,12 +99,26 @@ jobs:
           SNAP="$RUNNER_TEMP/parquets-snap"
           rm -rf "$SNAP"
           mkdir -p "$SNAP"
-          cp *.pq "$SNAP"/
-
           git init -q "$SNAP"
           git -C "$SNAP" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # 增量编译：先取回 parquets 分支上旧的 .pq，本次编译的结果只覆盖同名文件，
+          # 没改动的词库保持原字节不变；parquets 分支不存在（首次）时静默跳过
+          git -C "$SNAP" fetch -q origin parquets || true
+          git -C "$SNAP" checkout -q FETCH_HEAD 2>/dev/null || true
+          cp *.pq "$SNAP"/ 2>/dev/null || true
+          # 源文件已不存在的 .pq（本次提交删了词库）一并清掉，避免 parquets 残留
+          for old in "$SNAP"/*.pq; do
+            [ -e "$old" ] || continue
+            name="${old%.pq}"
+            name="${name##*/}"
+            [ -f "$GITHUB_WORKSPACE/$name.tsv" ] || [ -f "$GITHUB_WORKSPACE/$name.csv" ] || rm -f "$old"
+          done
+          git -C "$SNAP" add -A
+          if git -C "$SNAP" diff --cached --quiet; then
+            echo "parquets 无内容变化，跳过推送"
+            exit 0
+          fi
           git -C "$SNAP" config user.name "github-actions[bot]"
           git -C "$SNAP" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "$SNAP" add -A
           git -C "$SNAP" commit -q -m "build: 编译词库 ← ${{ github.sha }}"
           git -C "$SNAP" push -f origin HEAD:refs/heads/parquets

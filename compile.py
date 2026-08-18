@@ -10,7 +10,8 @@
 3. 也可用 --compiler-dir 显式指定。
 
 用法:
-    python compile.py [--compiler-dir <路径>]
+    python compile.py [--compiler-dir <路径>] [源文件 ...]
+    （不带源文件参数 = 编译目录下全部 .tsv/.csv；带参数 = 只编译列出的文件）
 """
 from __future__ import annotations
 
@@ -40,15 +41,37 @@ def resolve_compiler_dir(explicit: str | None) -> pathlib.Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--compiler-dir", help="含 pqcompile.py 等编译模块的目录（默认：父目录或 LEX_COMPILER_DIR）")
+    ap.add_argument(
+        "sources",
+        nargs="*",
+        help="只编译这些源文件（相对本目录的 .tsv/.csv 文件名）；不传则编译全部",
+    )
     args = ap.parse_args()
 
     compiler_dir = resolve_compiler_dir(args.compiler_dir)
     sys.path.insert(0, str(compiler_dir))
 
+    import logging
+
+    # 编译器的 JIT 预热进度条是 tqdm 显式传 disable=logger.level > logging.INFO 的，
+    # 显式传参优先于 TQDM_DISABLE 环境变量，所以只能把编译器的 logger 级别提上去关掉
+    # （只在这里改级别，不修改 lexloader/ 里的编译器本体）
+    for _name in ("colproto", "tianzi.lexloader.colproto"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
+
     import awkward as ak  # noqa: PLC0415
     from pqcompile import compile_dsv  # noqa: PLC0415
 
-    sources = sorted(HERE.glob("*.tsv")) + sorted(HERE.glob("*.csv"))
+    if args.sources:
+        sources: list[pathlib.Path] = []
+        for name in args.sources:
+            src = HERE / name
+            if not src.is_file() or src.suffix not in (".tsv", ".csv"):
+                print(f"不是有效的源文件: {name}", file=sys.stderr)
+                return 1
+            sources.append(src)
+    else:
+        sources = sorted(HERE.glob("*.tsv")) + sorted(HERE.glob("*.csv"))
     if not sources:
         print(f"未在 {HERE} 找到 .tsv/.csv 源文件", file=sys.stderr)
         return 1
