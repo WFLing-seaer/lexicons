@@ -1,0 +1,12 @@
+# 编译 lexicons 所需的依赖 —— 以全局 pip 环境实际安装版本为准
+# 注意：pinyinparser / pypinyin / pypinyin-dict 的版本直接影响编译产物里的
+# 拼音编码（Syllable 枚举值）与切词结果。编译端与下游运行端必须用同一组版本，
+# 否则拼音查询会整体错位（已知 pinyinparser 1.3.0 -> 1.4.0 所有拼音值 +32）。
+awkward==2.9.0
+frozendict==2.4.7
+numba==0.66.0
+numpy==2.4.2
+pinyinparser==1.4.0
+pypinyin==0.55.0
+pypinyin-dict==0.9.0
+tqdm==4.67.1

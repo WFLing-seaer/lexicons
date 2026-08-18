@@ -1,0 +1,60 @@
+name: compile
+
+# 源文件 / 编译器 / 构建脚本变化时触发；也可手动跑（workflow_dispatch）
+on:
+  push:
+    branches: [main]
+    paths:
+      - "*.tsv"
+      - "*.csv"
+      - "compiler/**"
+      - "compile.py"
+      - "requirements.txt"
+      - ".github/workflows/compile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write # 需要向 parquets 分支推送编译产物
+
+concurrency:
+  group: compile
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # numba 0.66.0 官方支持 3.10~3.13；3.13 最稳妥
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 编译词库
+        run: python compile.py
+
+      # parquets 分支是纯产物分支：每次从 0 生成一个干净快照并 force-push。
+      # 分支上永远只有当前这组 .pq，无历史包袱；下游同步方式见 README。
+      - name: 发布到 parquets 分支
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SNAP="$RUNNER_TEMP/parquets-snap"
+          rm -rf "$SNAP"
+          mkdir -p "$SNAP"
+          cp *.pq "$SNAP"/
+
+          git init -q "$SNAP"
+          git -C "$SNAP" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$SNAP" config user.name "github-actions[bot]"
+          git -C "$SNAP" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$SNAP" add -A
+          git -C "$SNAP" commit -q -m "build: 编译词库 from ${{ github.sha }}"
+          git -C "$SNAP" push -f origin HEAD:refs/heads/parquets

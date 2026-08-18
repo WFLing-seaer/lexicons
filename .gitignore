@@ -1,0 +1,14 @@
+# 编译产物：.pq 全部由 CI 从 csv/tsv 源生成并发布到 parquets 分支，不跟踪
+*.pq
+
+# 其他源的词库格式，不进仓库（由外部项目迁移/对接后按 csv/tsv 流程补充）
+/misc/
+/自定义.txt
+
+# tianzi 遗留的空目录占位，本仓库不需要
+.gitkeep
+
+# Python
+__pycache__/
+*.py[codz]
+.venv/
