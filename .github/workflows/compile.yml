@@ -49,13 +49,13 @@ jobs:
             if [ -n "$META" ]; then
               echo "编译器/依赖/工作流有变更 → 全量编译"
             else
-              CHANGED=$(git diff --name-only "$BEFORE" HEAD -- '*.tsv' '*.csv')
-              if [ -z "$CHANGED" ]; then
+              mapfile -d '' -t CHANGED < <(git -c core.quotepath=false diff --name-only -z "$BEFORE" HEAD -- '*.tsv' '*.csv')
+              if [ "${#CHANGED[@]}" -eq 0 ]; then
                 MODE=skip
               else
                 MODE=partial
                 # 文件名均不含空格；被删的源文件不在工作区，自然不会被编译
-                for f in $CHANGED; do
+                for f in "${CHANGED[@]}"; do
                   [ -f "$f" ] && SOURCES="$SOURCES $f"
                 done
               fi
