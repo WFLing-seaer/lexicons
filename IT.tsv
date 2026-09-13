@@ -1,4 +1,4 @@
-*{词}word.PT@{词}pinyin.py {DF}df.u32
+*{词}word.PT@pinyin.py	{DF}df.u32
 字符串 	 395499
 初始化 	 372767
 数组 	 357924
