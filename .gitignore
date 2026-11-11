@@ -1,4 +1,5 @@
 *.pq
+.*.pq.tmp
 
 /misc/
 /自定义.txt
