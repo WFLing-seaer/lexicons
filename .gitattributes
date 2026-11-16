@@ -1,0 +1,34 @@
+# 文本一律 LF（blob 里存的就是 LF，检出 / 提交都按 LF 走）
+#
+# 为什么钉死：这台 Windows 克隆曾经开着 core.autocrlf=true，仓库里存 LF、工作区检出 CRLF。
+# 网站（hongbot.icu 的词库编辑）读的是工作区那一份，照原样写回仓库就让整份文件从 LF 翻成
+# CRLF —— git 里显示成「全删 + 全加」，还跟别人的改动全冲突。现在：
+#   · 网站那条链路上凡是经手文本的地方都无条件折成 LF（提交 / 查看源文件 / 别名追加 / 写仓库）；
+#   · 这里再用 eol=lf 钉住，人工 `git add` 也不会再翻出 CRLF。
+* text=auto eol=lf
+
+# 词库源文件：文本（没有例外）
+*.tsv text eol=lf
+*.csv text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+.gitignore text eol=lf
+requirements.txt text eol=lf
+
+# Windows 批处理必须 CRLF，否则 cmd 会读错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 编译产物 / 二进制，别碰换行符
+*.pq binary
+*.zst binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
