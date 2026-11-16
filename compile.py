@@ -22,10 +22,16 @@
 - --force 完全忽略元数据；--dry-run 只报结论不写文件；--no-metadata 不写元数据
   （等于放弃跳过能力，每次都编）。
 
+跑完后还会做一次减量检测：目录里的 .pq 若本次运行没有被任何一个源文件判定过
+（重编、跳过、出错都算判定过），就当作孤儿剪切到 ./deleted/（不存在则创建；
+重名加 .1/.2 后缀）。--dry-run 下只报告不剪切。
+注意：带源文件参数时，未列出的源文件对应的 .pq 同样会被判为孤儿并剪切。
+
 用法:
     python compile.py [--compiler-dir <路径>] [--force] [--dry-run] [--no-metadata] [源文件 ...]
     （不带源文件参数 = 编译目录下全部 .tsv/.csv；带参数 = 只编译列出的文件）
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,6 +39,7 @@ import importlib.metadata
 import io
 import os
 import pathlib
+import shutil
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -80,18 +87,55 @@ def compiler_fingerprint(pqmeta, compiler_dir: pathlib.Path) -> dict[str, str]:
     return parts
 
 
+def quarantine_orphans(handled: set[pathlib.Path], dry_run: bool) -> tuple[int, int]:
+    """减量检测：把本次运行没判定过的 .pq 当作孤儿剪切到 ./deleted/。
+
+    handled 里是本次运行判定过的产物路径（重编、跳过、出错都算判定过）。
+    返回 (孤儿数, 剪切失败数)。--dry-run 下只报告，不建目录、不剪切。
+    """
+    orphans = [p for p in sorted(HERE.glob("*.pq")) if p.resolve() not in handled]
+    if not orphans:
+        print("减量检测：无孤儿 .pq", flush=True)
+        return 0, 0
+
+    if dry_run:
+        for p in orphans:
+            print(f"孤儿（--dry-run，不剪切）: {p.name}", flush=True)
+        return len(orphans), 0
+
+    dest_dir = HERE / "deleted"
+    dest_dir.mkdir(exist_ok=True)
+    failed = 0
+    for p in orphans:
+        target = dest_dir / p.name
+        n = 1
+        while target.exists():
+            target = dest_dir / f"{p.stem}.{n}{p.suffix}"
+            n += 1
+        try:
+            shutil.move(str(p), str(target))
+        except OSError as e:
+            print(f"剪切孤儿失败: {p.name} ({e})", file=sys.stderr)
+            failed += 1
+            continue
+        print(f"孤儿剪切: {p.name} -> deleted/{target.name}", flush=True)
+    return len(orphans), failed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--compiler-dir", help="含 pqcompile.py 等编译模块的目录（默认：父目录或 LEX_COMPILER_DIR）")
     ap.add_argument(
-        "--force", "-f",
+        "--force",
+        "-f",
         action="store_true",
         help="忽略产物里记的源文件元数据，指定的源文件全部重编",
     )
     ap.add_argument(
-        "--dry-run", "-n",
+        "--dry-run",
+        "-n",
         action="store_true",
-        help="只打印每个源文件是「该编」还是「能跳过」，不写任何产物",
+        help="只打印每个源文件是「该编」还是「能跳过」，不写任何产物、不剪切孤儿",
     )
     ap.add_argument(
         "--no-metadata",
@@ -111,7 +155,7 @@ def main() -> int:
     # 免得编译器目录里的同名文件把 pqmeta 抢走（反过来 pqmeta 也不会挡编译器的导入）
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
-    import pqmeta  # noqa: PLC0415
+    import pqmeta
 
     sys.path.insert(0, str(compiler_dir))
 
@@ -123,7 +167,7 @@ def main() -> int:
     for _name in ("colproto", "tianzi.lexloader.colproto"):
         logging.getLogger(_name).setLevel(logging.WARNING)
 
-    from pqcompile import compile_dsv  # noqa: PLC0415
+    from pqcompile import compile_dsv
 
     if args.sources:
         sources: list[pathlib.Path] = []
@@ -144,10 +188,13 @@ def main() -> int:
     check_metadata = use_metadata and not args.force
 
     delim = {".tsv": "\t", ".csv": ","}
-    compiled = skip_stamp = skip_hash = 0
+    compiled = skip_stamp = skip_hash = error = 0
+    # 本次运行判定过的产物（重编 / 跳过 / 出错都算判定过），供收尾的减量检测用
+    handled: set[pathlib.Path] = set()
 
     for src in sources:
         out = src.with_suffix(".pq")
+        handled.add(out.resolve())
         st = src.stat()
 
         meta = pqmeta.read_metadata(out, pipeline=pipeline) if check_metadata else None
@@ -177,7 +224,12 @@ def main() -> int:
 
         print(f"编译 {src.name} -> {out.name}  (compiler: {compiler_dir})", flush=True)
         # 一次读完再解：算 hash 的字节和真正编译的字节严格是同一份
-        arr = compile_dsv(io.StringIO(data.decode("utf-8")), delim[src.suffix])
+        try:
+            arr = compile_dsv(io.StringIO(data.decode("utf-8")), delim[src.suffix])
+        except Exception as e:
+            print(f"编译失败: {src.name} -> {out.name} ({e})", file=sys.stderr)
+            error += 1
+            continue
         metadata = (
             None
             if not use_metadata
@@ -195,14 +247,20 @@ def main() -> int:
         print(f"  完成: {len(arr)} 行{tail}", flush=True)
         compiled += 1
 
+    # 减量检测：本目录里没被本次运行判定过的 .pq 一律视为孤儿，剪切到 ./deleted/
+    orphan_count, orphan_failed = quarantine_orphans(handled, args.dry_run)
+
     skipped = skip_stamp + skip_hash
     head = f"共 {len(sources)} 个源文件："
-    tail = f"跳过 {skipped}（修改时间未变 {skip_stamp}，sha256 未变 {skip_hash}）"
+    tail = f"跳过 {skipped}（修改时间未变 {skip_stamp}，sha256 未变 {skip_hash}），错误 {error}"
     if args.dry_run:
-        print(f"{head}该编 {compiled}，{tail}（--dry-run：没有写任何产物）", flush=True)
+        print(
+            f"{head}该编 {compiled}，{tail}；孤儿 {orphan_count}（--dry-run：没有写任何产物）",
+            flush=True,
+        )
     else:
-        print(f"{head}编译 {compiled}，{tail}", flush=True)
-    return 0
+        print(f"{head}编译 {compiled}，{tail}；孤儿 {orphan_count}（剪切失败 {orphan_failed}）", flush=True)
+    return 1 if orphan_failed else 0
 
 
 if __name__ == "__main__":
