@@ -22,13 +22,16 @@
 - --force 完全忽略元数据；--dry-run 只报结论不写文件；--no-metadata 不写元数据
   （等于放弃跳过能力，每次都编）。
 
-跑完后还会做一次减量检测：目录里的 .pq 若本次运行没有被任何一个源文件判定过
-（重编、跳过、出错都算判定过），就当作孤儿剪切到 ./deleted/（不存在则创建；
-重名加 .1/.2 后缀）。--dry-run 下只报告不剪切。
-注意：带源文件参数时，未列出的源文件对应的 .pq 同样会被判为孤儿并剪切。
+跑完后还会做一次减量检测：源文件已经不在了的 .pq（同名的 .tsv/.csv 都不存在）判为孤儿，
+剪切到 ./deleted/（不存在则创建；重名加 .1/.2 后缀）。--dry-run 下只报告不剪切。
+
+孤儿剪切只在**编译全部**时执行。带源文件参数时（CI 的增量编译、本地只编某几个词表都是这种），
+其余词表的产物本次根本没有被判定过，什么都不能说明，所以只报告疑似孤儿、绝不剪切；
+否则「只编一部分」会把目录里其余的 .pq 全部当成孤儿删掉。要强制剪切时加 --prune-orphans。
 
 用法:
-    python compile.py [--compiler-dir <路径>] [--force] [--dry-run] [--no-metadata] [源文件 ...]
+    python compile.py [--compiler-dir <路径>] [--force] [--dry-run] [--no-metadata]
+                      [--prune-orphans] [源文件 ...]
     （不带源文件参数 = 编译目录下全部 .tsv/.csv；带参数 = 只编译列出的文件）
 """
 
@@ -87,26 +90,48 @@ def compiler_fingerprint(pqmeta, compiler_dir: pathlib.Path) -> dict[str, str]:
     return parts
 
 
-def quarantine_orphans(handled: set[pathlib.Path], dry_run: bool) -> tuple[int, int]:
-    """减量检测：把本次运行没判定过的 .pq 当作孤儿剪切到 ./deleted/。
+def has_source(pq_path: pathlib.Path) -> bool:
+    """这个 .pq 还能不能找到它的源文件（同名 .tsv/.csv 任一存在即算有）。"""
+    return pq_path.with_suffix(".tsv").is_file() or pq_path.with_suffix(".csv").is_file()
 
-    handled 里是本次运行判定过的产物路径（重编、跳过、出错都算判定过）。
+
+def find_orphans(handled: set[pathlib.Path]) -> list[pathlib.Path]:
+    """减量检测的候选：本次运行没判定过、且源文件已经不在的 .pq。
+
+    判定只看「源文件还在不在」，不看「本次编译了哪些」：只编译一部分词表时，其余词表的源
+    文件都还在，它们的产物因此天然被排除在孤儿之外（handled 只是额外一层保险）。
+    """
+    return [
+        p
+        for p in sorted(HERE.glob("*.pq"))
+        if p.resolve() not in handled and not has_source(p)
+    ]
+
+
+def quarantine_orphans(orphans: list[pathlib.Path], prune: bool, dry_run: bool) -> tuple[int, int]:
+    """把孤儿 .pq 剪切到 ./deleted/；prune=False 时只报告不动手。
+
     返回 (孤儿数, 剪切失败数)。--dry-run 下只报告，不建目录、不剪切。
     """
-    orphans = [p for p in sorted(HERE.glob("*.pq")) if p.resolve() not in handled]
     if not orphans:
         print("减量检测：无孤儿 .pq", flush=True)
         return 0, 0
 
-    if dry_run:
+    if not prune or dry_run:
+        reason = "本次只编译部分源文件，不剪切" if not prune else "--dry-run，不剪切"
         for p in orphans:
-            print(f"孤儿（--dry-run，不剪切）: {p.name}", flush=True)
+            print(f"疑似孤儿（{reason}）: {p.name}", file=sys.stderr, flush=True)
         return len(orphans), 0
 
     dest_dir = HERE / "deleted"
     dest_dir.mkdir(exist_ok=True)
     failed = 0
     for p in orphans:
+        # 兜底：源文件此刻还在就绝不剪切（宁可漏删，也不能误删）
+        if has_source(p):
+            print(f"跳过剪切（源文件仍在）: {p.name}", file=sys.stderr)
+            failed += 1
+            continue
         target = dest_dir / p.name
         n = 1
         while target.exists():
@@ -141,6 +166,11 @@ def main() -> int:
         "--no-metadata",
         action="store_true",
         help="不在产物里写 lexicon.* 元数据（也就无法判断新旧，等于每次都重编）",
+    )
+    ap.add_argument(
+        "--prune-orphans",
+        action="store_true",
+        help="只编译部分源文件时也执行孤儿剪切（默认只在编译全部时剪切，避免误删其余词表的产物）",
     )
     ap.add_argument(
         "sources",
@@ -243,23 +273,29 @@ def main() -> int:
             )
         )
         pqmeta.write_parquet(arr, out, metadata)
-        tail = "" if metadata else "（未写元数据）"
-        print(f"  完成: {len(arr)} 行{tail}", flush=True)
+        meta_note = "" if metadata else "（未写元数据）"
+        print(f"  完成: {len(arr)} 行{meta_note}", flush=True)
         compiled += 1
 
-    # 减量检测：本目录里没被本次运行判定过的 .pq 一律视为孤儿，剪切到 ./deleted/
-    orphan_count, orphan_failed = quarantine_orphans(handled, args.dry_run)
+    # 减量检测：孤儿 = 源文件已经不在的 .pq。只在编译全部时才真的剪切 ——
+    # 只编译部分源文件时，其它词表的产物本次根本没被判定过，一律不动（只报告）。
+    prune = not args.sources or args.prune_orphans
+    orphan_count, orphan_failed = quarantine_orphans(find_orphans(handled), prune, args.dry_run)
 
     skipped = skip_stamp + skip_hash
     head = f"共 {len(sources)} 个源文件："
-    tail = f"跳过 {skipped}（修改时间未变 {skip_stamp}，sha256 未变 {skip_hash}），错误 {error}"
-    if args.dry_run:
-        print(
-            f"{head}该编 {compiled}，{tail}；孤儿 {orphan_count}（--dry-run：没有写任何产物）",
-            flush=True,
-        )
+    body = f"跳过 {skipped}（修改时间未变 {skip_stamp}，sha256 未变 {skip_hash}），错误 {error}"
+    if prune:
+        if args.dry_run:
+            note = f"孤儿 {orphan_count}（--dry-run：没有写任何产物、没有剪切）"
+        else:
+            note = f"孤儿 {orphan_count}（已剪切到 deleted/，剪切失败 {orphan_failed}）"
     else:
-        print(f"{head}编译 {compiled}，{tail}；孤儿 {orphan_count}（剪切失败 {orphan_failed}）", flush=True)
+        note = f"疑似孤儿 {orphan_count}（未剪切：本次只编译了部分源文件）"
+    if args.dry_run:
+        print(f"{head}该编 {compiled}，{body}；{note}", flush=True)
+    else:
+        print(f"{head}编译 {compiled}，{body}；{note}", flush=True)
     return 1 if orphan_failed else 0
 
 

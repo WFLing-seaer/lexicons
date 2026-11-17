@@ -9,3 +9,5 @@
 __pycache__/
 *.py[codz]
 .venv/
+pack_release.py
+.forgejo/workflows/compile.yml
